@@ -5,26 +5,12 @@
 %% See EXIF data format description:
 % https://www.media.mit.edu/pia/Research/deepview/exif.html
 
+read_start_of_image(<<16#FF:8, 16#D8:8, Img/binary>>) -> Img;
+read_start_of_image(_) -> throw(not_start_of_image).
 
-foo(Filename) ->
-    case file:read_file(Filename) of
-        {ok, Binary} -> Binary;
-        {error, Err} -> throw(Err)
-    end.
+is_end_of_image(<<16#FF:8, 16#D9:8>>) -> true;
+is_end_of_image(_) -> false.
 
-% split_binary(bin,pos)
-
-read_start_of_image(Binary) ->
-    case split_binary(Binary,2) of
-        {<<16#FF:8, 16#D8:8>>, Img} -> Img;
-        _ -> throw(not_start_of_image)
-    end.
-
-is_end_of_image(Binary) ->
-    case Binary of
-        <<16#FF:8, 16#D9:8>> -> true;
-        _ -> false
-    end.
 
 hex_dump(Binary) -> hex_dump(Binary, 0).
 hex_dump(Binary, I) ->
@@ -38,9 +24,9 @@ read_marker(Binary) ->
     {Marker,Rest} = split_binary(Binary, 4),
     case Marker of
         <<16#FF:8, MarkerNum:8, DataSize:16/big>> ->
-            io:format("marker ~.16B with size ~p ~n", [MarkerNum, DataSize-2]),
+            % io:format("marker ~.16B with size ~p ~n", [MarkerNum, DataSize-2]),
             {Data, Rest1} = split_binary(Rest, DataSize-2),
-            hex_dump(Data),
+            %hex_dump(Data),
             {#marker{type=MarkerNum,size=DataSize-2,data=Data}, Rest1};
         _ -> throw({not_at_marker, Marker})
     end.
@@ -67,7 +53,9 @@ read_tiff_header(Bin) ->
           Rest/binary>> ->
             {_, IfdData} = split_binary(Rest, IfdOffset-8),
             read_ifds(IfdData);
-        _ -> {error, Bin}
+        _ ->
+            hex_dump(element(split_binary(Bin,32), 1)),
+            {error, Bin}
     end.
 
 
@@ -106,7 +94,7 @@ ifd_val(2, Data) ->
 ifd_val(3, <<Short:16/unsigned, _/binary>>) -> Short;
 ifd_val(4, <<Long:32/unsigned>>) -> Long;
 ifd_val(5, <<Numerator:32/unsigned,Denominator:32/unsigned>> = D) ->
-    io:format("rational: ~p~n", [D]),
+    %io:format("rational: ~p~n", [D]),
     {Numerator,Denominator};
 ifd_val(X, Data) -> {type,X,data,Data}.
 
@@ -120,7 +108,7 @@ read_ifd_entries(_, Count, Bin, Map) when Count =:= 0 -> {Map, Bin};
 read_ifd_entries(Ifd, Count, Bin, Map) ->
     case Bin of
         <<Tag:16,Type:16,Cnt:32,DataOrOffset:4/binary,Rest/binary>> ->
-            io:format("Got tag: ~p, type: ~p, cnt: ~p at ~p~n", [Tag,Type,Cnt,DataOrOffset]),
+            %io:format("Got tag: ~p, type: ~p, cnt: ~p at ~p~n", [Tag,Type,Cnt,DataOrOffset]),
             BytesPerComponent = case Type of
                                     1 -> 1; % unsigned byte
                                     2 -> 1; % string
@@ -177,7 +165,7 @@ read_ifds(Whole, Bin, Map) ->
         <<0:32, Img/binary>> -> {NewMap, Img};
         <<NextIfd:32, _/binary>> ->
             %% offset from where??
-            io:format("seuraava ~p~n", [NextIfd]),
+            %io:format("seuraava ~p~n", [NextIfd]),
             read_ifds(Whole, element(2,split_binary(Whole,NextIfd-8)), NewMap)
             %%{seuraava, NextIfd, Map, IfdMap}
     end.
@@ -185,5 +173,5 @@ read_ifds(Whole, Bin, Map) ->
 read_header(Filename) ->
     {ok, Bin} = file:read_file(Filename),
     Img = read_start_of_image(Bin),
-    App1 = read_marker(Img),
-    read_tiff_header(App1).
+    {App1,_Rest} = read_marker(Img),
+    read_tiff_header(App1#marker.data).
