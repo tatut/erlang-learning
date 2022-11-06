@@ -14,11 +14,14 @@
 
 parse_url(Url) ->
     Part = fun({Start,Len}) -> lists:sublist(Url, Start+1, Len) end,
-    case re:run(Url, "http://([^/]*)(/.*)?$") of
-        {match, [_, Host, Path]} ->
-            #url{host=Part(Host), path=Part(Path)};
-        {match, [_, Host]} ->
-            #url{host=Part(Host)};
+    case re:run(Url, "([^:]+)://([^/]*)(/.*)?$") of
+        {match, [_, Scheme, Host, Path]} ->
+            #url{scheme=list_to_atom(Part(Scheme)),
+                 host=Part(Host),
+                 path=Part(Path)};
+        {match, [_, Scheme, Host]} ->
+            #url{scheme=list_to_atom(Part(Scheme)),
+                 host=Part(Host)};
         _ -> {error, {badurl, Url}}
     end.
 
