@@ -27,6 +27,9 @@ read(<<$*, Arr/binary>>) ->
     end;
 read(<<$$, Bulk/binary>>) ->
     %% prefixed bulk string, return as binary
+%% FIXME: large message will not be delivered all at once...
+%% if binary is too small, we need to return a continuation function
+%% that will receive more data
     {ok, Size, Rest} = resp_value(Bulk, fun binary_to_integer/1),
     {Bin, Rest1} = split_binary(Rest, Size),
     {_, Rest2} = split_binary(Rest1, 2), % remove CRLF
