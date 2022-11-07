@@ -42,6 +42,8 @@ read_array(Items, Bin, Arr) ->
     {ok, Item, Rest} = read(Bin),
     read_array(Items-1, Rest, [Item|Arr]).
 
+write(null) ->
+    <<"*-1\r\n">>;
 write(Int) when is_integer(Int) ->
     [":", integer_to_list(Int), <<"\r\n">>];
 write({error, Message}) ->
@@ -52,8 +54,7 @@ write(StrOrList) when is_list(StrOrList) ->
     case io_lib:printable_unicode_list(StrOrList) of
         true -> ["+", StrOrList, <<"\r\n">>];
         false -> ["*", integer_to_list(length(StrOrList)), <<"\r\n">>,
-                  [write(X) || X <- StrOrList],
-                 <<"\r\n">>]
+                  [write(X) || X <- StrOrList]]
     end.
 
 
@@ -79,7 +80,7 @@ serve(Table,Socket) ->
 
 process_cmds(Table, Data, Socket) ->
     {ok, [Cmd | Args] = FullCmd, Rest} = read(Data),
-    %io:format("GOT: ~p~nRAW: ~p~n", [FullCmd, Data]),
+    io:format("GOT: ~p~nRAW: ~p~n", [FullCmd, Data]),
     Res = try
               process(Table, Cmd, Args)
           catch
@@ -88,7 +89,7 @@ process_cmds(Table, Data, Socket) ->
                   io:format("ERROR ~p~n", [E]),
                   {error, "Internal error, see log"}
           end,
-    %io:format("  -> ~p~nRAW> ~p~n", [Res, iolist_to_binary(write(Res))]),
+    io:format("  -> ~p~nRAW> ~p~n", [Res, iolist_to_binary(write(Res))]),
     gen_tcp:send(Socket, write(Res)),
     if size(Rest) == 0 -> ok;
        true -> process_cmds(Table, Rest, Socket)
@@ -99,18 +100,34 @@ coerce_int(Bin) ->
     catch error:badarg -> throw("Not integer")
     end.
 
-incr(T, Key, By) ->
-    Old = case  ets:lookup(T, Key) of
-              [{_,Val}] -> Val;
-              _ -> <<"0">>
+update(T, Key, Default, UpdateFn) ->
+    Old = case ets:lookup(T, Key) of
+              [{_, Val}] -> Val;
+              _ -> Default
           end,
-    New = coerce_int(Old) + By,
-    ets:insert(T, {Key, integer_to_binary(New)}),
-    New.
+    {New,Ret} = UpdateFn(Old),
+    ets:insert(T, {Key, New}),
+    Ret.
+
+incr(T, Key, By) ->
+    update(T, Key, <<"0">>,
+           fun(Bin) ->
+                   New = coerce_int(Bin) + By,
+                   {integer_to_binary(New), New}
+           end).
+
+hupdate(T, Key, Field, Default, UpdateFn) ->
+    update(T, Key, #{},
+           fun(Map) when is_map(Map) ->
+                   NewVal = UpdateFn(maps:get(Field, Map, Default)),
+                   NewMap = maps:put(Field, NewVal, Map),
+                   {NewMap, NewVal};
+              (_) -> throw("Not a map")
+           end).
 
 process(_, <<"COMMAND">>, [<<"DOCS">>]) -> "OK";
-%process(_, <<"PING">>, []) -> "PONG";
-%process(_, <<"PING">>, [Msg]) -> Msg;
+process(_, <<"PING">>, []) -> "PONG";
+process(_, <<"PING">>, [Msg]) -> Msg;
 %process(_, <<"CONFIG">>, [Cmd, Name]) ->
 %    [Name,
 %     case [Cmd, Name] of
@@ -119,8 +136,10 @@ process(_, <<"COMMAND">>, [<<"DOCS">>]) -> "OK";
 %     end];
 process(T, <<"SET">>, [Key, Val]) -> ets:insert(T, {Key,Val}), Val;
 process(T, <<"GET">>, [Key]) ->
-    [{_,Val}] = ets:lookup(T, Key),
-    Val;
+    case ets:lookup(T, Key) of
+        [{_,Val}] -> Val;
+        [] -> null
+    end;
 process(T, <<"INCR">>, [Key]) ->
     incr(T, Key, 1);
 process(T, <<"INCRBY">>, [Key, By]) ->
@@ -128,4 +147,26 @@ process(T, <<"INCRBY">>, [Key, By]) ->
 process(T, <<"DECR">>, [Key]) ->
     incr(T, Key, -1);
 process(T, <<"DECRBY">>, [Key, By]) ->
-    incr(T, Key, -1 * coerce_int(By)).
+    incr(T, Key, -1 * coerce_int(By));
+process(T, <<"HSET">>, [Key, Field, Value]) ->
+    hupdate(T, Key, Field, ignore,
+            fun(_) -> Value end);
+process(T, <<"HGET">>, [Key, Field]) ->
+    case ets:lookup(T, Key) of
+        [{_,Val}] -> maps:get(Field, Val, null);
+        [] -> null
+    end;
+process(T, <<"HINCRBY">>, [Key, Field, By]) ->
+    hupdate(T, Key, Field, <<"0">>, fun(N) -> integer_to_binary(coerce_int(N) + coerce_int(By)) end);
+process(T, <<"HKEYS">>, [Key]) ->
+    case ets:lookup(T, Key) of
+        [{_,Val}] -> maps:keys(Val);
+        [] -> []
+    end;
+process(T, <<"DEL">>, Keys) ->
+    lists:foldl(fun(K,A) ->
+                        A + case ets:lookup(T, K) of
+                                [] -> 0;
+                                _ -> ets:delete(T, K), 1
+                            end
+                end, 0, Keys).
