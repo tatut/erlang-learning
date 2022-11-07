@@ -12,38 +12,108 @@ resp_split(Bin) ->
     binary:split(Bin,<<"\r\n">>).
 
 resp_value(Bin, Parser) ->
-    [Data,Rest] = resp_split(Bin),
-    {ok, Parser(Data), Rest}.
+    case resp_split(Bin) of
+        %% We didn't have enough data, return an incomplete
+        [Bin] ->
+            {incomplete,
+             fun(MoreBin) ->
+                     resp_value(iolist_to_binary([Bin,MoreBin]), Parser)
+             end};
+        [Data,Rest] ->
+            %% Enough data to parse
+            {ok, Parser(Data), Rest}
+    end.
 
-
-read(<<$+, Str/binary>>) -> resp_value(Str, fun binary_to_list/1);
-read(<<$-, Err/binary>>) -> resp_value(Err, fun binary_to_list/1);
-read(<<$:, Int/binary>>) -> resp_value(Int, fun binary_to_integer/1);
-read(<<$*, Arr/binary>>) ->
-    {ok, Count, Rest} = resp_value(Arr, fun binary_to_integer/1),
+%% Read Count amount of bytes, or if there are not enough,
+%% return an incomplete with a continuation
+resp_read(Bin, Count, Parser) ->
+    Received = iolist_size(Bin),
     if
-        Count == -1 -> {ok, null, Rest}; % array of -1 len is considered the null
-        true -> read_array(Count, Rest, [])
-    end;
+        Count =< Received ->
+            %% We have enough
+            {Read, Rest} = split_binary(iolist_to_binary(Bin), Count),
+            {ok, Parser(Read), Rest};
+        true ->
+            %% We need more
+            {incomplete,
+             fun(MoreBin) ->
+                     resp_read([Bin, MoreBin], Count, Parser)
+             end}
+    end.
+
+with_value(Bin, Cont) ->
+    case resp_split(Bin) of
+        [Bin] ->
+            {incomplete,
+             fun(MoreBin) ->
+                     with_value(iolist_to_binary([Bin,MoreBin]), Cont)
+             end};
+        [Val,Rest] ->
+            Cont(Val, Rest)
+    end.
+
+read(<<$+, Str/binary>>) ->
+    with_value(Str,
+               fun(S,Rest) ->
+                       {ok, binary_to_list(S), Rest}
+               end);
+read(<<$-, Err/binary>>) ->
+    with_value(Err,
+               fun(E,Rest) ->
+                       {ok, binary_to_list(E), Rest}
+               end);
+read(<<$:, Int/binary>>) ->
+    with_value(Int,
+               fun(I,Rest) ->
+                       {ok, binary_to_integer(I), Rest}
+               end);
+read(<<$*, Arr/binary>>) ->
+    with_value(
+      Arr,
+      fun (CountB, Rest) ->
+              Count = binary_to_integer(CountB),
+              if
+                  %% array of -1 len is considered the null
+                  Count == -1 -> {ok, null, Rest};
+                  true -> read_array(Count, Rest, [])
+              end
+      end);
 read(<<$$, Bulk/binary>>) ->
     %% prefixed bulk string, return as binary
-%% FIXME: large message will not be delivered all at once...
-%% if binary is too small, we need to return a continuation function
-%% that will receive more data
-    {ok, Size, Rest} = resp_value(Bulk, fun binary_to_integer/1),
-    {Bin, Rest1} = split_binary(Rest, Size),
-    {_, Rest2} = split_binary(Rest1, 2), % remove CRLF
-    {ok, if
-             Bin == <<"Null">> -> null;
-             true -> Bin
-         end,
-     Rest2}.
+    with_value(
+      Bulk,
+      fun(SizeB, Rest) ->
+              Size = binary_to_integer(SizeB),
+              resp_read(Rest, Size + 2, % include CRLF
+                        fun(<<"Null\r\n">>) -> null;
+                           (Bin) -> {BinStr,_} = split_binary(Bin, Size), BinStr
+                        end)
+      end).
 
 read_array(0, Rest, Arr) ->
     {ok, lists:reverse(Arr), Rest};
 read_array(Items, Bin, Arr) ->
-    {ok, Item, Rest} = read(Bin),
-    read_array(Items-1, Rest, [Item|Arr]).
+    case read(Bin) of
+        {ok, Item, Rest} ->
+            read_array(Items-1, Rest, [Item|Arr]);
+        {incomplete, Cont} ->
+            read_array_cont(Items,Arr,Cont)
+    end.
+
+read_array_cont(Items,Arr,Cont) ->
+    %io:format("arr cont ~p, ~p ~n",[Items, Arr]),
+    {incomplete,
+     fun(MoreBin) ->
+             case Cont(MoreBin) of
+                 {incomplete, Cont1} ->
+                     %io:format("still incomplete ~p~n", [Arr]),
+                     read_array_cont(Items,Arr,Cont1);
+                 {ok, Item, Rest} ->
+                     %io:format("item complete ~p~n", [Item]),
+                     read_array(Items-1, Rest, [Item|Arr])
+             end
+     end}.
+
 
 write(null) ->
     <<"*-1\r\n">>;
@@ -61,41 +131,52 @@ write(StrOrList) when is_list(StrOrList) ->
     end.
 
 
-
-%% redis:read(<<"*3\r\n:420\r\n$5\r\nhello\r\n+world\r\n">>).
-%% {ok, [420, <<"hello">>, "world"], <<>>}
 start(Port) ->
     Table = ets:new(redisdata, [set,public]),
     {ok, Listen} = gen_tcp:listen(Port, [binary,{reuseaddr,true}]),
+    spawn(fun() -> accept(Table, Listen) end),
+    %% return function to stop server
+    fun() -> gen_tcp:close(Listen) end.
+
+accept(Table,Listen) ->
     {ok, Socket} = gen_tcp:accept(Listen),
     inet:setopts(Socket,[{packet,0},binary,{active, true}]),
-    serve(Table,Socket),
-    gen_tcp:close(Listen).
+    spawn(fun() -> accept(Table,Listen) end),
+    serve(Table,Socket).
 
-serve(Table,Socket) ->
+
+serve(Table,Socket) -> serve(Table,Socket, fun read/1).
+serve(Table,Socket,ReadFn) ->
     receive
         {tcp, Socket, Data} ->
-            ok = process_cmds(Table, Data, Socket),
-            serve(Table,Socket);
+            NextReadFn = process_cmds(Table, Data, Socket, ReadFn),
+            serve(Table,Socket,NextReadFn);
         {tcp_closed, Socket} ->
             ok
     end.
 
-process_cmds(Table, Data, Socket) ->
-    {ok, [Cmd | Args] = FullCmd, Rest} = read(Data),
-    io:format("GOT: ~p~nRAW: ~p~n", [FullCmd, Data]),
-    Res = try
-              process(Table, Cmd, Args)
-          catch
-              throw:Msg -> {error, Msg};
-              error:E ->
-                  io:format("ERROR ~p~n", [E]),
-                  {error, "Internal error, see log"}
-          end,
-    io:format("  -> ~p~nRAW> ~p~n", [Res, iolist_to_binary(write(Res))]),
-    gen_tcp:send(Socket, write(Res)),
-    if size(Rest) == 0 -> ok;
-       true -> process_cmds(Table, Rest, Socket)
+process_cmds(Table, Data, Socket, ReadFn) ->
+    case ReadFn(Data) of
+        {incomplete, Cont} -> Cont;
+        {ok, [Cmd | Args] = FullCmd, Rest} ->
+            %%io:format("GOT: ~p~nRAW: ~p~n", [FullCmd, Data]),
+            Res = try
+                      process(Table, Cmd, Args)
+                  catch
+                      throw:Msg -> {error, Msg};
+                      error:E ->
+                          io:format("ERROR ~p~n", [E]),
+                          {error, "Internal error, see log"}
+                  end,
+            %%io:format("  -> ~p~nRAW> ~p~n", [Res, iolist_to_binary(write(Res))]),
+            gen_tcp:send(Socket, write(Res)),
+            if size(Rest) == 0 ->
+                    %% Read everything, just return
+                    fun read/1;
+               true ->
+                    %% Still more data to read, try reading next
+                    process_cmds(Table, Rest, Socket, fun read/1)
+            end
     end.
 
 coerce_int(Bin) ->
