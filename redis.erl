@@ -218,7 +218,7 @@ process(_, <<"PING">>, [Msg]) -> Msg;
 %         [<<"GET">>, <<"save">>] -> "3600 1 300 100 60 10000";
 %         [<<"GET">>, <<"appendonly">>] -> "no"
 %     end];
-process(T, <<"SET">>, [Key, Val]) -> ets:insert(T, {Key,Val}), Val;
+process(T, <<"SET">>, [Key, Val]) -> ets:insert(T, {Key,Val}), "OK";
 process(T, <<"GET">>, [Key]) ->
     case ets:lookup(T, Key) of
         [{_,Val}] -> Val;
