@@ -35,3 +35,12 @@ read_continuation_arr_test() ->
                           <<"*3\r\n:420\r\n:">>,
                           <<"666\r\n+end\r\nREST">>,
                           <<"REST">>).
+
+read_roundtrip(X) ->
+    Written = iolist_to_binary(redis:write(X)),
+    {ok, X, <<>>} = redis:read(Written),
+    ok.
+
+read_roundtrip_test() ->
+    read_roundtrip(["help", <<"I'm stuck in a list">>, 666]),
+    read_roundtrip(null).
