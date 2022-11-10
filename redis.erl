@@ -17,7 +17,6 @@ resp_split(Bin) ->
 
 %% Read Count amount of bytes, or if there are not enough,
 %% return an incomplete with a continuation
-%% @type resp_read(binary(), integer(), function()) -> parsed()
 -spec resp_read(binary(), integer(), function()) -> parsed().
 resp_read(Bin, Count, Parser) ->
     Received = iolist_size(Bin),
@@ -85,6 +84,7 @@ read(<<$$, Bulk/binary>>) ->
                         end)
       end).
 
+-spec read_array(integer(), binary(), [any()]) -> [any()].
 read_array(0, Rest, Arr) ->
     {ok, lists:reverse(Arr), Rest};
 read_array(Items, Bin, Arr) ->
@@ -95,6 +95,7 @@ read_array(Items, Bin, Arr) ->
             read_array_cont(Items,Arr,Cont)
     end.
 
+-spec read_array_cont(integer(), [any()], function()) -> incomplete().
 read_array_cont(Items,Arr,Cont) ->
     %io:format("arr cont ~p, ~p ~n",[Items, Arr]),
     {incomplete,
@@ -109,7 +110,7 @@ read_array_cont(Items,Arr,Cont) ->
              end
      end}.
 
-
+-spec write(any()) -> iolist().
 write(null) ->
     <<"*-1\r\n">>;
 write(Int) when is_integer(Int) ->
@@ -125,7 +126,7 @@ write(StrOrList) when is_list(StrOrList) ->
                   [write(X) || X <- StrOrList]]
     end.
 
-
+-spec start(integer()) -> function().
 start(Port) ->
     Table = ets:new(redisdata, [set,public]),
     {ok, Listen} = gen_tcp:listen(Port, [binary,{reuseaddr,true}]),
