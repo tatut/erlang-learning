@@ -11,21 +11,14 @@
 resp_split(Bin) ->
     binary:split(Bin,<<"\r\n">>).
 
-resp_value(Bin, Parser) ->
-    case resp_split(Bin) of
-        %% We didn't have enough data, return an incomplete
-        [Bin] ->
-            {incomplete,
-             fun(MoreBin) ->
-                     resp_value(iolist_to_binary([Bin,MoreBin]), Parser)
-             end};
-        [Data,Rest] ->
-            %% Enough data to parse
-            {ok, Parser(Data), Rest}
-    end.
+-type incomplete() :: {incomplete, function()}.
+-type complete() :: {ok, any(), binary()}.
+-type parsed() :: complete() | incomplete().
 
 %% Read Count amount of bytes, or if there are not enough,
 %% return an incomplete with a continuation
+%% @type resp_read(binary(), integer(), function()) -> parsed()
+-spec resp_read(binary(), integer(), function()) -> parsed().
 resp_read(Bin, Count, Parser) ->
     Received = iolist_size(Bin),
     if
@@ -41,6 +34,7 @@ resp_read(Bin, Count, Parser) ->
              end}
     end.
 
+-spec with_value(binary(), function()) -> parsed().
 with_value(Bin, Cont) ->
     case resp_split(Bin) of
         [Bin] ->
@@ -52,6 +46,7 @@ with_value(Bin, Cont) ->
             Cont(Val, Rest)
     end.
 
+-spec read(binary()) -> parsed().
 read(<<$+, Str/binary>>) ->
     with_value(Str,
                fun(S,Rest) ->
