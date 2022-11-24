@@ -1,5 +1,5 @@
 -module(redis).
--export([read/1, write/1, start/1]).
+-export([read/1, write/1, start/1, demo/0]).
 
 % A very minimal Redis wire protocol server that saves
 % values to ETS.
@@ -97,7 +97,6 @@ read_array(Items, Bin, Arr) ->
 
 -spec read_array_cont(integer(), [any()], function()) -> incomplete().
 read_array_cont(Items,Arr,Cont) ->
-    %io:format("arr cont ~p, ~p ~n",[Items, Arr]),
     {incomplete,
      fun(MoreBin) ->
              case Cont(MoreBin) of
@@ -140,6 +139,9 @@ accept(Table,Listen) ->
     spawn(fun() -> accept(Table,Listen) end),
     serve(Table,Socket).
 
+demo()->
+    observer:start(),
+    start(6666).
 
 serve(Table,Socket) -> serve(Table,Socket, fun read/1).
 serve(Table,Socket,ReadFn) ->
@@ -148,7 +150,8 @@ serve(Table,Socket,ReadFn) ->
             NextReadFn = process_cmds(Table, Data, Socket, ReadFn),
             serve(Table,Socket,NextReadFn);
         {tcp_closed, Socket} ->
-            ok
+            ok;
+        Else -> io:format("got something weird: ~p~n", [Else])
     end.
 
 process_cmds(Table, Data, Socket, ReadFn) ->
@@ -170,6 +173,7 @@ process_cmds(Table, Data, Socket, ReadFn) ->
                     %% Read everything, just return
                     fun read/1;
                true ->
+                    %% io:format("MORE TO READ ~p\n", [size(Rest)]),
                     %% Still more data to read, try reading next
                     process_cmds(Table, Rest, Socket, fun read/1)
             end
@@ -208,12 +212,12 @@ hupdate(T, Key, Field, Default, UpdateFn) ->
 process(_, <<"COMMAND">>, [<<"DOCS">>]) -> "OK";
 process(_, <<"PING">>, []) -> "PONG";
 process(_, <<"PING">>, [Msg]) -> Msg;
-%process(_, <<"CONFIG">>, [Cmd, Name]) ->
-%    [Name,
-%     case [Cmd, Name] of
-%         [<<"GET">>, <<"save">>] -> "3600 1 300 100 60 10000";
-%         [<<"GET">>, <<"appendonly">>] -> "no"
-%     end];
+process(_, <<"CONFIG">>, [Cmd, Name]) ->
+    [Name,
+     case [Cmd, Name] of
+         [<<"GET">>, <<"save">>] -> <<"3600 1 300 100 60 10000">>;
+         [<<"GET">>, <<"appendonly">>] -> <<"no">>
+     end];
 process(T, <<"SET">>, [Key, Val]) -> ets:insert(T, {Key,Val}), "OK";
 process(T, <<"GET">>, [Key]) ->
     case ets:lookup(T, Key) of
